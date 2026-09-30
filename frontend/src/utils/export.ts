@@ -13,6 +13,7 @@ import { ROLE_TYPE_LABEL, PROP_PART_LABEL } from '../types/role';
 import { PLAY_GENRE_LABEL, PLAY_STATUS_LABEL } from '../types/play';
 import { SHADOW_SCREEN_LABEL } from '../types/scene';
 import { SKILL_TAG_LABEL, minuteToClock, WEEKDAY_LABEL } from '../types/operator';
+import { BATCH_STATUS_LABEL, SCREEN_VOLUME, type LoadBatch, type LoadPlan } from '../types/loading';
 
 /** 触发浏览器下载 */
 function download(filename: string, content: string, mime: string): void {
@@ -43,6 +44,8 @@ export interface ExportBundle {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  loadPlans?: LoadPlan[];
+  loadBatches?: LoadBatch[];
 }
 
 /** 导出整库 JSON 存档 */
@@ -209,6 +212,94 @@ export function buildCallSheetText(
         lines.push(
           `  · ${role.name}（${ROLE_TYPE_LABEL[role.roleType]}）操耍：${operatorName(role.operatorId)}｜影件：${
             role.propParts.map((part) => PROP_PART_LABEL[part]).join('／') || '无需拆件'
+          }`,
+        );
+      });
+    });
+  return lines.join('\n');
+}
+
+/* ---------------------------- 巡演装车单 ---------------------------- */
+
+/** 按车号、车中次序排好的批次（装车单导出复用） */
+export function orderLoadingBatches(batches: LoadBatch[]): LoadBatch[] {
+  return [...batches].sort((a, b) => a.vehicleNo - b.vehicleNo || a.orderInVehicle - b.orderInVehicle || a.seq - b.seq);
+}
+
+/** 单剧目巡演装车单导出为 CSV：每件影件一行，装车师傅照着点数 */
+export function exportLoadingCsvFile(play: Play, batches: LoadBatch[]): string {
+  const ordered = orderLoadingBatches(batches);
+  const header = [
+    '车号',
+    '车中次序',
+    '场序',
+    '场次',
+    '角色',
+    '影件',
+    '影窗规格',
+    '影窗单位',
+    '本批单位',
+    '状态',
+    '顺延',
+    '装车备注',
+  ];
+  const lines: string[] = [header.map(csvCell).join(',')];
+  ordered.forEach((batch) => {
+    const rowCount = Math.max(batch.items.length, 1);
+    for (let index = 0; index < rowCount; index += 1) {
+      const item = batch.items[index];
+      lines.push(
+        [
+          index === 0 ? `第 ${batch.vehicleNo} 车` : '',
+          index === 0 ? batch.orderInVehicle + 1 : '',
+          index === 0 ? batch.seq : '',
+          index === 0 ? batch.sceneTitle : '',
+          item ? item.roleName : '',
+          item ? PROP_PART_LABEL[item.part] : '',
+          index === 0 ? SHADOW_SCREEN_LABEL[batch.screenSpec] : '',
+          index === 0 ? SCREEN_VOLUME[batch.screenSpec] : '',
+          index === 0 ? batch.volume : '',
+          index === 0 ? BATCH_STATUS_LABEL[batch.status] : '',
+          index === 0 ? (batch.delayed ? '顺延' : batch.overCapacity ? '超容' : '') : '',
+          index === 0 ? batch.note : '',
+        ]
+          .map(csvCell)
+          .join(','),
+      );
+    }
+  });
+  const filename = `${play.title}-巡演装车单-${stampSuffix()}.csv`;
+  download(filename, `\uFEFF${lines.join('\n')}`, 'text/csv;charset=utf-8');
+  return filename;
+}
+
+/** 生成可复制的巡演装车单纯文本（按车分组） */
+export function buildLoadingSheetText(play: Play, plan: LoadPlan, batches: LoadBatch[]): string {
+  const ordered = orderLoadingBatches(batches);
+  const lines: string[] = [];
+  lines.push(`【${play.title}】巡演装车单（每车容量 ${plan.vehicleCapacity} 单位 · 共 ${plan.totalVehicles} 车）`);
+  const byVehicle = new Map<number, LoadBatch[]>();
+  ordered.forEach((batch) => {
+    byVehicle.set(batch.vehicleNo, [...(byVehicle.get(batch.vehicleNo) ?? []), batch]);
+  });
+  [...byVehicle.keys()]
+    .sort((a, b) => a - b)
+    .forEach((vehicleNo) => {
+      const vehicleBatches = byVehicle.get(vehicleNo) ?? [];
+      const used = vehicleBatches.reduce((sum, batch) => sum + batch.volume, 0);
+      const allSealed = vehicleBatches.every((batch) => batch.status === 'sealed');
+      lines.push(`\n第 ${vehicleNo} 车（${used}/${plan.vehicleCapacity} 单位 · ${allSealed ? '已封车' : '待封车'}）`);
+      vehicleBatches.forEach((batch) => {
+        const partsByRole = new Map<string, string[]>();
+        batch.items.forEach((item) => {
+          partsByRole.set(item.roleName, [...(partsByRole.get(item.roleName) ?? []), PROP_PART_LABEL[item.part]]);
+        });
+        const props = [...partsByRole.entries()]
+          .map(([roleName, parts]) => `${roleName}(${parts.join('／')})`)
+          .join('、');
+        lines.push(
+          `  第${batch.seq}场 ${batch.sceneTitle}｜${SHADOW_SCREEN_LABEL[batch.screenSpec]}｜影件：${props || '无'}｜共 ${batch.volume} 单位${
+            batch.note ? `｜${batch.note}` : ''
           }`,
         );
       });

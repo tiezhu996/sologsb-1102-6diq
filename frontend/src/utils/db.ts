@@ -10,11 +10,12 @@ import type { Scene } from '../types/scene';
 import type { ShadowRole } from '../types/role';
 import type { Operator } from '../types/operator';
 import type { PercussionCue } from '../types/cue';
+import type { LoadBatch, LoadPlan } from '../types/loading';
 import { nowIso } from './uuid';
 import { seedDatabase } from './seed';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据库名 */
 export const DB_NAME = 'gbshadowplay';
@@ -30,6 +31,8 @@ export type SceneRow = Scene & Revisioned;
 export type RoleRow = ShadowRole & Revisioned;
 export type OperatorRow = Operator & Revisioned;
 export type CueRow = PercussionCue & Revisioned;
+export type LoadPlanRow = LoadPlan & Revisioned;
+export type LoadBatchRow = LoadBatch & Revisioned;
 
 export const ROW_REVISION = 2;
 
@@ -39,6 +42,8 @@ class ShadowPlayDatabase extends Dexie {
   roles!: Table<RoleRow, string>;
   operators!: Table<OperatorRow, string>;
   cues!: Table<CueRow, string>;
+  loadPlans!: Table<LoadPlanRow, string>;
+  loadBatches!: Table<LoadBatchRow, string>;
 
   constructor() {
     super(DB_NAME);
@@ -78,6 +83,12 @@ class ShadowPlayDatabase extends Dexie {
           });
         }
       });
+
+    // v3：新增巡演装车单两张表（计划每剧目一份，批次按场次一行）；既有表结构不变，无需 upgrade 回填
+    this.version(DB_SCHEMA_VERSION).stores({
+      loadPlans: 'id, playId, status, updatedAt',
+      loadBatches: 'id, playId, sceneId, status, vehicleNo',
+    });
   }
 }
 
@@ -107,16 +118,22 @@ export async function putPlay(row: PlayRow): Promise<void> {
 }
 
 export async function removePlay(id: string): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, async () => {
-    const scenes = await db.scenes.where('playId').equals(id).toArray();
-    const sceneIds = scenes.map((scene) => scene.id);
-    if (sceneIds.length > 0) {
-      await db.roles.where('sceneId').anyOf(sceneIds).delete();
-      await db.cues.where('sceneId').anyOf(sceneIds).delete();
-    }
-    await db.scenes.where('playId').equals(id).delete();
-    await db.plays.delete(id);
-  });
+  await db.transaction(
+    'rw',
+    [db.plays, db.scenes, db.roles, db.cues, db.loadPlans, db.loadBatches],
+    async () => {
+      const scenes = await db.scenes.where('playId').equals(id).toArray();
+      const sceneIds = scenes.map((scene) => scene.id);
+      if (sceneIds.length > 0) {
+        await db.roles.where('sceneId').anyOf(sceneIds).delete();
+        await db.cues.where('sceneId').anyOf(sceneIds).delete();
+      }
+      await db.loadBatches.where('playId').equals(id).delete();
+      await db.loadPlans.where('playId').equals(id).delete();
+      await db.scenes.where('playId').equals(id).delete();
+      await db.plays.delete(id);
+    },
+  );
 }
 
 /* ------------------------------ 场次 ------------------------------ */
@@ -214,6 +231,49 @@ export async function removeCue(id: string): Promise<void> {
   await db.cues.delete(id);
 }
 
+/* ---------------------------- 巡演装车单 ---------------------------- */
+
+export async function getLoadPlan(playId: string): Promise<LoadPlanRow | undefined> {
+  return db.loadPlans.get(`plan:${playId}`);
+}
+
+export async function listAllLoadPlans(): Promise<LoadPlanRow[]> {
+  return db.loadPlans.toArray();
+}
+
+export async function listLoadBatchesByPlay(playId: string): Promise<LoadBatchRow[]> {
+  return db.loadBatches.where('playId').equals(playId).toArray();
+}
+
+export async function putLoadPlan(row: LoadPlanRow): Promise<void> {
+  await db.loadPlans.put(row);
+}
+
+export async function putLoadBatch(row: LoadBatchRow): Promise<void> {
+  await db.loadBatches.put(row);
+}
+
+export async function bulkPutLoadBatches(rows: LoadBatchRow[]): Promise<void> {
+  await db.loadBatches.bulkPut(rows);
+}
+
+/** 删除某剧目全部待封车批次（重排前清理孤儿批次；已封车批次保留） */
+export async function deletePendingLoadBatches(playId: string): Promise<void> {
+  await db.loadBatches
+    .where('playId')
+    .equals(playId)
+    .filter((batch) => batch.status === 'pending')
+    .delete();
+}
+
+/** 删除某剧目全部装车数据（重建整张装车单） */
+export async function deletePlanData(playId: string): Promise<void> {
+  await db.transaction('rw', db.loadPlans, db.loadBatches, async () => {
+    await db.loadBatches.where('playId').equals(playId).delete();
+    await db.loadPlans.where('playId').equals(playId).delete();
+  });
+}
+
 /* --------------------------- 整库导入导出 --------------------------- */
 
 export interface DatabaseSnapshot {
@@ -226,16 +286,21 @@ export interface DatabaseSnapshot {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  /** 旧存档无此两项，导入时按空数组处理 */
+  loadPlans?: LoadPlan[];
+  loadBatches?: LoadBatch[];
 }
 
 /** 导出整库快照（去掉内部 revision 字段） */
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [plays, scenes, roles, operators, cues] = await Promise.all([
+  const [plays, scenes, roles, operators, cues, loadPlans, loadBatches] = await Promise.all([
     db.plays.toArray(),
     db.scenes.toArray(),
     db.roles.toArray(),
     db.operators.toArray(),
     db.cues.toArray(),
+    db.loadPlans.toArray(),
+    db.loadBatches.toArray(),
   ]);
   const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
     const { revision: _revision, ...rest } = row;
@@ -250,50 +315,68 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
     roles: roles.map(strip),
     operators: operators.map(strip),
     cues: cues.map(strip),
+    loadPlans: loadPlans.map(strip),
+    loadBatches: loadBatches.map(strip),
   };
 }
 
 /** 用快照覆盖整库（导入存档） */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
-    await Promise.all([
-      db.plays.clear(),
-      db.scenes.clear(),
-      db.roles.clear(),
-      db.operators.clear(),
-      db.cues.clear(),
-    ]);
-    const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
-    await db.plays.bulkPut(snapshot.plays.map(rev));
-    await db.scenes.bulkPut(snapshot.scenes.map(rev));
-    await db.roles.bulkPut(snapshot.roles.map(rev));
-    await db.operators.bulkPut(snapshot.operators.map(rev));
-    await db.cues.bulkPut(snapshot.cues.map(rev));
-  });
+  await db.transaction(
+    'rw',
+    [db.plays, db.scenes, db.roles, db.operators, db.cues, db.loadPlans, db.loadBatches],
+    async () => {
+      await Promise.all([
+        db.plays.clear(),
+        db.scenes.clear(),
+        db.roles.clear(),
+        db.operators.clear(),
+        db.cues.clear(),
+        db.loadPlans.clear(),
+        db.loadBatches.clear(),
+      ]);
+      const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
+      await db.plays.bulkPut(snapshot.plays.map(rev));
+      await db.scenes.bulkPut(snapshot.scenes.map(rev));
+      await db.roles.bulkPut(snapshot.roles.map(rev));
+      await db.operators.bulkPut(snapshot.operators.map(rev));
+      await db.cues.bulkPut(snapshot.cues.map(rev));
+      // 兼容不含装车单的旧存档
+      await db.loadPlans.bulkPut((snapshot.loadPlans ?? []).map(rev));
+      await db.loadBatches.bulkPut((snapshot.loadBatches ?? []).map(rev));
+    },
+  );
 }
 
 /** 清空全部数据并重新灌入示例数据 */
 export async function resetDatabase(): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
-    await Promise.all([
-      db.plays.clear(),
-      db.scenes.clear(),
-      db.roles.clear(),
-      db.operators.clear(),
-      db.cues.clear(),
-    ]);
-  });
+  await db.transaction(
+    'rw',
+    [db.plays, db.scenes, db.roles, db.operators, db.cues, db.loadPlans, db.loadBatches],
+    async () => {
+      await Promise.all([
+        db.plays.clear(),
+        db.scenes.clear(),
+        db.roles.clear(),
+        db.operators.clear(),
+        db.cues.clear(),
+        db.loadPlans.clear(),
+        db.loadBatches.clear(),
+      ]);
+    },
+  );
   await seedDatabase();
 }
 
 /** 粗略统计各表行数，用于页脚与概览展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [plays, scenes, roles, operators, cues] = await Promise.all([
+  const [plays, scenes, roles, operators, cues, loadPlans] = await Promise.all([
     db.plays.count(),
     db.scenes.count(),
     db.roles.count(),
     db.operators.count(),
     db.cues.count(),
+    db.loadPlans.count(),
   ]);
-  return { plays, scenes, roles, operators, cues };
+  return { plays, scenes, roles, operators, cues, loadPlans };
 }

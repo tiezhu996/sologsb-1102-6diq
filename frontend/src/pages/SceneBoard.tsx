@@ -25,6 +25,7 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  CarOutlined,
   CheckSquareOutlined,
   PlusOutlined,
   SaveOutlined,
@@ -188,6 +189,12 @@ export default function SceneBoard() {
           <Space wrap>
             <Button icon={<PlusOutlined />} type="primary" onClick={openCreate}>
               新增场次
+            </Button>
+            <Button
+              icon={<CarOutlined />}
+              onClick={() => navigate(ROUTES.loading(playId))}
+            >
+              巡演装车
             </Button>
             <Button
               icon={<TeamOutlined />}
