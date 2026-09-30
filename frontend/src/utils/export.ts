@@ -7,6 +7,7 @@ import type { Scene } from '../types/scene';
 import type { ShadowRole } from '../types/role';
 import type { Operator } from '../types/operator';
 import type { PercussionCue } from '../types/cue';
+import type { LoadingManifest, LoadingManifestView, PackedBatch, LoadUnit, LoadItem } from '../types/loading';
 import { secondsToTimecode } from './timecode';
 import { BEAT_NAME_LABEL, INSTRUMENT_LABEL } from '../types/cue';
 import { ROLE_TYPE_LABEL, PROP_PART_LABEL } from '../types/role';
@@ -43,6 +44,8 @@ export interface ExportBundle {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  /** 巡演装车单（v3 起；旧版存档可能缺省） */
+  loadingManifests?: LoadingManifest[];
 }
 
 /** 导出整库 JSON 存档 */
@@ -170,6 +173,65 @@ export function exportOperatorCsvFile(operators: Operator[], roles: ShadowRole[]
   });
   const filename = `操耍人档-${stampSuffix()}.csv`;
   download(filename, `\uFEFF${lines.join('\n')}`, 'text/csv;charset=utf-8');
+  return filename;
+}
+
+/** 巡演装车单导出为 CSV（一车一块，含封车状态与顺延说明） */
+export function exportLoadingCsv(play: Play, view: LoadingManifestView): string {
+  const lines: string[] = [];
+  lines.push(csvCell(`剧目：${play.title}（巡演装车单）`));
+  lines.push(csvCell(`每车容量：${view.capacity} 箱位`));
+  lines.push(
+    csvCell(
+      `已封车 ${view.sealedCount} 车 / 待装 ${view.waitingCount} 车；顺延影响 ${view.delayedSceneIds.length} 场次`,
+    ),
+  );
+  lines.push('');
+
+  const header = ['车批', '封车状态', '场序', '场次', '明细', '本场合计箱位', '本车合计箱位', '顺延/超载说明'];
+  lines.push(header.map(csvCell).join(','));
+
+  const noteOf = (batch: PackedBatch, unit: LoadUnit): string => {
+    const notes: string[] = [];
+    if (batch.delayed) notes.push('前车容量不足，排队顺延');
+    if (unit.totalSlots > batch.capacity) notes.push('单场超出全车容量，需另作调度');
+    if (unit.missing) notes.push('该场次已从剧目删除，按封车快照保留');
+    return notes.join('；');
+  };
+
+  view.batches.forEach((batch) => {
+    const batchLabel = `第 ${batch.batchNo} 车`;
+    const status = batch.status === 'sealed' ? '已封车' : '待装车';
+    batch.units.forEach((unit, unitIndex) => {
+      const detail = unit.items
+        .filter((item: LoadItem) => item.kind !== 'screen')
+        .map((item: LoadItem) => item.label)
+        .join('／');
+      const screenNote = `影窗：${SHADOW_SCREEN_LABEL[unit.screen]}（${unit.screenItem.slots} 箱位）`;
+      lines.push(
+        [
+          unitIndex === 0 ? batchLabel : '',
+          unitIndex === 0 ? status : '',
+          unit.seq,
+          `${unit.title}${unit.missing ? '（已删除）' : ''}`,
+          `${screenNote}；影件：${detail || '无'}`,
+          unit.totalSlots,
+          unitIndex === 0 ? `${batch.totalSlots} / ${batch.capacity}` : '',
+          noteOf(batch, unit),
+        ]
+          .map(csvCell)
+          .join(','),
+      );
+    });
+  });
+
+  return `\uFEFF${lines.join('\n')}`;
+}
+
+/** 导出巡演装车单 CSV 文件 */
+export function exportLoadingCsvFile(play: Play, view: LoadingManifestView): string {
+  const filename = `${play.title}-巡演装车单-${stampSuffix()}.csv`;
+  download(filename, exportLoadingCsv(play, view), 'text/csv;charset=utf-8');
   return filename;
 }
 

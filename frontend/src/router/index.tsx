@@ -12,6 +12,7 @@ const SceneBoard = lazy(() => import('../pages/SceneBoard'));
 const RoleAssign = lazy(() => import('../pages/RoleAssign'));
 const CueTimeline = lazy(() => import('../pages/CueTimeline'));
 const OperatorList = lazy(() => import('../pages/OperatorList'));
+const LoadingSheet = lazy(() => import('../pages/LoadingSheet'));
 
 /** 懒加载页面占位 */
 function RouteFallback() {
@@ -26,6 +27,7 @@ function withSuspense(node: ReactNode): ReactNode {
 export const ROUTES = {
   plays: '/plays',
   scenes: (playId: string): string => `/plays/${playId}/scenes`,
+  loading: (playId: string): string => `/plays/${playId}/loading`,
   roles: (sceneId: string): string => `/scenes/${sceneId}/roles`,
   cues: (sceneId: string): string => `/scenes/${sceneId}/cues`,
   operators: '/operators',
@@ -39,6 +41,7 @@ export const appRoutes: RouteObject[] = [
       { index: true, element: <Navigate to={ROUTES.plays} replace /> },
       { path: 'plays', element: withSuspense(<PlayList />) },
       { path: 'plays/:id/scenes', element: withSuspense(<SceneBoard />) },
+      { path: 'plays/:id/loading', element: withSuspense(<LoadingSheet />) },
       { path: 'scenes/:id/roles', element: withSuspense(<RoleAssign />) },
       { path: 'scenes/:id/cues', element: withSuspense(<CueTimeline />) },
       { path: 'operators', element: withSuspense(<OperatorList />) },

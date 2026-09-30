@@ -25,6 +25,7 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  CarOutlined,
   CheckSquareOutlined,
   PlusOutlined,
   SaveOutlined,
@@ -202,6 +203,9 @@ export default function SceneBoard() {
               onClick={() => activeSceneId && navigate(ROUTES.cues(activeSceneId))}
             >
               锣鼓点
+            </Button>
+            <Button icon={<CarOutlined />} onClick={() => navigate(ROUTES.loading(playId))}>
+              巡演装车单
             </Button>
           </Space>
         </div>
